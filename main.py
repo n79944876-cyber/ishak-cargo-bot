@@ -5,8 +5,8 @@ import requests
 import telebot
 
 TOKEN = os.getenv("BOT_TOKEN")
+SHEET_ID = "1xxG-pE2lsLsCp3VPFWwA-ZokeVZd_3xS"
 
-SHEET_ID = "1psGMXz8yOQVKNvHjpL1wmmP5j44qGKtm"
 SHEET_NAME = "Товарлар"
 
 bot = telebot.TeleBot(TOKEN)
