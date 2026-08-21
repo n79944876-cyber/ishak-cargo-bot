@@ -171,4 +171,126 @@ def search_track(message):
             f"📍 Статус: {status}\n"
         )
 
-        if received.strip
+        if received.strip().lower() == "ооба":
+            answer += "✅ Товар получен клиентом\n"
+        elif received.strip().lower() == "жок":
+            answer += "📦 Товар ожидает выдачи\n"
+
+        bot.send_message(
+            message.chat.id,
+            answer,
+            reply_markup=main_menu()
+        )
+
+    except Exception as error:
+        print("TRACK ERROR:", error)
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Не удалось получить информацию из таблицы.",
+            reply_markup=main_menu()
+        )
+
+
+@bot.message_handler(func=lambda message: message.text == "📦 Мои посылки")
+def my_packages_instruction(message):
+    msg = bot.send_message(
+        message.chat.id,
+        "📦 Отправьте свой код клиента.\n\nПример: K001"
+    )
+    bot.register_next_step_handler(msg, search_customer)
+
+
+def search_customer(message):
+    customer_code = message.text.strip().upper()
+
+    try:
+        rows = get_products()
+        found = []
+
+        for row in rows:
+            code = str(row.get("Кардар коду", "")).strip().upper()
+            if code == customer_code:
+                found.append(row)
+
+        if not found:
+            bot.send_message(
+                message.chat.id,
+                f"❌ По коду {customer_code} товары не найдены.",
+                reply_markup=main_menu()
+            )
+            return
+
+        customer_name = found[0].get("Кардардын аты", "")
+
+        answer = (
+            f"👤 Клиент: {customer_name}\n"
+            f"🆔 Код: {customer_code}\n\n"
+        )
+
+        total_weight = 0
+
+        for number, item in enumerate(found, 1):
+            track = item.get("Трек-код", "")
+            product = item.get("Товар", "")
+            quantity = item.get("Саны", "")
+            weight = item.get("Салмагы (кг)", "")
+            status = item.get("Статус", "")
+            received = item.get("Кардар алдыбы?", "")
+
+            try:
+                total_weight += float(str(weight).replace(",", "."))
+            except:
+                pass
+
+            answer += (
+                f"📦 {number}. {product}\n"
+                f"🔎 Трек-код: {track}\n"
+                f"🔢 Количество: {quantity}\n"
+                f"⚖️ Вес: {weight} кг\n"
+                f"📍 Статус: {status}\n"
+            )
+
+            if received.strip().lower() == "ооба":
+                answer += "✅ Получено\n"
+            elif received.strip().lower() == "жок":
+                answer += "⏳ Ожидает выдачи\n"
+
+            answer += "\n"
+
+        answer += (
+            f"📊 Всего товаров: {len(found)}\n"
+            f"⚖️ Общий вес: {total_weight:.2f} кг"
+        )
+
+        bot.send_message(
+            message.chat.id,
+            answer,
+            reply_markup=main_menu()
+        )
+
+    except Exception as error:
+        print("CUSTOMER ERROR:", error)
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Не удалось получить данные из таблицы.",
+            reply_markup=main_menu()
+        )
+
+
+@bot.message_handler(func=lambda message: True)
+def other_messages(message):
+    text = message.text.strip().upper()
+
+    if text.startswith("K"):
+        search_customer(message)
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "Выберите нужный раздел в меню 👇",
+        reply_markup=main_menu()
+    )
+
+
+print("ISHAK Cargo bot работает...")
+bot.infinity_polling(skip_pending=True)        
