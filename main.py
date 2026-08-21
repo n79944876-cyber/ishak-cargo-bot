@@ -232,7 +232,7 @@ def profile_by_customer_code(message):
             message.chat.id,
             "⚠️ Не удалось проверить код клиента.",
             reply_markup=main_menu()
-        )        )
+        )        
 
 
 # =========================
