@@ -155,13 +155,9 @@ def show_profile(message, found):
         reply_markup=main_menu()
     )
 
-
-@bot.message_handler(
-    commands=["profile"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "👤 Профиль"
-)
+  
+@bot.message_handler(commands=["profile"])
+@bot.message_handler(func=lambda message: message.text == "👤 Профиль")
 def profile(message):
     try:
         found = find_customer_by_telegram_id(
@@ -174,10 +170,10 @@ def profile(message):
 
         msg = bot.send_message(
             message.chat.id,
-            "👤 Профиль али Telegram аккаунтуңузга "
-            "байланыштырыла элек.\n\n"
-            "Кардар кодуңузду бир жолу жибериңиз.\n"
-            "Мисалы: K001"
+            "👤 Ваш профиль пока не привязан к Telegram-аккаунту.\n\n"
+            "Отправьте код клиента один раз.\n"
+            "Например: K001",
+            reply_markup=main_menu()
         )
 
         bot.register_next_step_handler(
@@ -187,20 +183,22 @@ def profile(message):
 
     except Exception as error:
         print("PROFILE ERROR:", error)
-
         bot.send_message(
             message.chat.id,
-            "⚠️ Профиль маалыматтарын алуу мүмкүн болгон жок.",
+            "⚠️ Не удалось открыть профиль.",
             reply_markup=main_menu()
         )
 
 
 def profile_by_customer_code(message):
+    if message.text == "👤 Профиль":
+        profile(message)
+        return
+
     customer_code = message.text.strip().upper()
 
     try:
         rows = get_products()
-
         found = []
 
         for row in rows:
@@ -214,7 +212,8 @@ def profile_by_customer_code(message):
         if not found:
             bot.send_message(
                 message.chat.id,
-                f"❌ {customer_code} коду боюнча кардар табылган жок.",
+                f"❌ Клиент с кодом {customer_code} не найден.\n"
+                "Проверьте код и попробуйте ещё раз.",
                 reply_markup=main_menu()
             )
             return
@@ -223,22 +222,17 @@ def profile_by_customer_code(message):
 
         bot.send_message(
             message.chat.id,
-            "🔗 Профилди автоматтык кылуу үчүн:\n\n"
-            f"Telegram ID: {message.from_user.id}\n\n"
-            "Бул IDни таблицадагы ушул кардардын "
-            "«Telegram ID» колонкасына бир жолу жазыңыз.\n"
-            "Андан кийин Профиль кодду кайра сурабайт.",
+            "✅ Профиль успешно привязан к Telegram-аккаунту.",
             reply_markup=main_menu()
         )
 
     except Exception as error:
         print("PROFILE CODE ERROR:", error)
-
         bot.send_message(
             message.chat.id,
-            "⚠️ Таблицадан маалымат алуу мүмкүн болгон жок.",
+            "⚠️ Не удалось проверить код клиента.",
             reply_markup=main_menu()
-        )
+        )        )
 
 
 # =========================
