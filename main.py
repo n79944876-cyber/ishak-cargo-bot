@@ -138,7 +138,7 @@ def find_customer_by_telegram_id(telegram_id):
     return result
 
 
-  def show_profile(message, found):
+def show_profile(message, found):
     customer = found[0]
 
     customer_name = customer.get("Аты-жөнү", "")
