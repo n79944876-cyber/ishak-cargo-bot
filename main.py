@@ -33,7 +33,22 @@ def get_products():
 
     text = response.content.decode("utf-8-sig")
     return list(csv.DictReader(io.StringIO(text)))
+def get_customers():
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
 
+    response = requests.get(
+        url,
+        params={
+            "tqx": "out:csv",
+            "sheet": "Кардарлар"
+        },
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    text = response.content.decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text)))
 
 # =========================
 # TELEGRAM MENU
@@ -110,7 +125,7 @@ def start(message):
 # =========================
 
 def find_customer_by_telegram_id(telegram_id):
-    rows = get_products()
+    rows = get_customers()
 
     result = []
 
@@ -123,30 +138,28 @@ def find_customer_by_telegram_id(telegram_id):
     return result
 
 
-def show_profile(message, found):
-    customer_name = found[0].get("Кардардын аты", "")
-    customer_code = found[0].get("Кардар коду", "")
+  def show_profile(message, found):
+    customer = found[0]
 
-    total_weight = 0
+    customer_name = customer.get("Аты-жөнү", "")
+    customer_code = customer.get("Кардар коду", "")
+    phone = customer.get("Телефон", "")
+    kg_address = customer.get("Кыргызстандагы дареги", "")
 
-    for item in found:
-        weight = item.get("Салмагы (кг)", "")
-
-        try:
-            total_weight += float(
-                str(weight).replace(",", ".")
-            )
-        except:
-            pass
+    china_address = (
+        "墨涵 18078825935 广东省佛山市南海区 "
+        "里水镇草场海南州工业区98号KFC87启那科技园E104-1墨 "
+        f"(ISHAK) {customer_code} ({phone})"
+    )
 
     text = (
         "👤 ПРОФИЛЬ\n\n"
-        f"👤 Кардар: {customer_name}\n"
+        f"👤 Аты-жөнү: {customer_name}\n"
         f"🆔 Кардар коду: {customer_code}\n"
-        f"📦 Товарлар: {len(found)}\n"
-        f"⚖️ Жалпы салмак: {total_weight:.2f} кг\n\n"
-        "📦 Товарларыңызды көрүү үчүн "
-        "«Мои посылки» бөлүмүн басыңыз."
+        f"📱 Телефон: {phone}\n"
+        f"📍 Алуу жери: {kg_address}\n\n"
+        "🇨🇳 КЫТАЙДАГЫ СКЛАДДЫН ДАРЕГИ\n\n"
+        f"{china_address}"
     )
 
     bot.send_message(
@@ -154,8 +167,6 @@ def show_profile(message, found):
         text,
         reply_markup=main_menu()
     )
-
-  
 @bot.message_handler(commands=["profile"])
 @bot.message_handler(func=lambda message: message.text == "👤 Профиль")
 def profile(message):
@@ -198,7 +209,7 @@ def profile_by_customer_code(message):
     customer_code = message.text.strip().upper()
 
     try:
-        rows = get_products()
+        rows = get_customers()
         found = []
 
         for row in rows:
