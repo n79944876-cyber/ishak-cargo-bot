@@ -7,7 +7,7 @@ from telebot import types
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-SHEET_ID = "1xxG-pE2lsLsCp3VPFWwA-ZokeVZd_3xS"
+SHEET_ID = "1RlRU8YG-mqxsqtswXReeORcg-M0eeynzg-4Wby5OpFU"
 SHEET_NAME = "Товарлар"
 
 bot = telebot.TeleBot(TOKEN)
