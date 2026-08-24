@@ -13,7 +13,7 @@ from telebot import types
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-SHEET_ID = "1RlRU8VG-mqxsqtswXReeORcg-MOeeynzg-4wby5OpFU"
+SHEET_ID = "1RlRU8YG-mqxsqtswXReeORcg-M0eeynzg-4Wby5OpFU"
 PRODUCTS_SHEET = "Товарлар"
 CUSTOMERS_SHEET = "Кардарлар"
 
