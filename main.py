@@ -1,565 +1,659 @@
 import os
 import csv
 import io
+import json
+import threading
 import requests
 import telebot
 from telebot import types
 
+# =========================
+# SETTINGS
+# =========================
+
 TOKEN = os.getenv("BOT_TOKEN")
 
-SHEET_ID = "1RlRU8YG-mqxsqtswXReeORcg-M0eeynzg-4Wby5OpFU"
-SHEET_NAME = "Товарлар"
+SHEET_ID = "1RlRU8VG-mqxsqtswXReeORcg-MOeeynzg-4wby5OpFU"
+PRODUCTS_SHEET = "Товарлар"
+CUSTOMERS_SHEET = "Кардарлар"
+
+PHONE = "+996 556 050 995"
+DATA_FILE = "bot_data.json"
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN табылган жок / BOT_TOKEN не найден")
 
 bot = telebot.TeleBot(TOKEN)
+data_lock = threading.Lock()
 
 
 # =========================
-# GOOGLE TABLE
+# LOCAL DATA
 # =========================
+# Бул файл кардардын тилин жана Telegram ↔ кардар код байланышын сактайт.
+# Railway кайра deploy болгондо файл өчүп калышы мүмкүн.
+# Эгер кийин Google Sheets'ке түз жаздыруу кошулса, бул байланыш андан да туруктуу болот.
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"languages": {}, "bindings": {}}
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("languages", {})
+        data.setdefault("bindings", {})
+        return data
+    except Exception:
+        return {"languages": {}, "bindings": {}}
+
+
+BOT_DATA = load_data()
+
+
+def save_data():
+    with data_lock:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(BOT_DATA, f, ensure_ascii=False, indent=2)
+
+
+def get_lang(message):
+    return BOT_DATA["languages"].get(str(message.from_user.id), "kg")
+
+
+def set_lang(user_id, lang):
+    BOT_DATA["languages"][str(user_id)] = lang
+    save_data()
+
+
+def get_bound_code(user_id):
+    return BOT_DATA["bindings"].get(str(user_id), "")
+
+
+def bind_code(user_id, customer_code):
+    BOT_DATA["bindings"][str(user_id)] = customer_code
+    save_data()
+
+
+def bound_to_other_user(customer_code, current_user_id):
+    for uid, code in BOT_DATA["bindings"].items():
+        if code == customer_code and uid != str(current_user_id):
+            return True
+    return False
+
+
+# =========================
+# GOOGLE SHEETS READ
+# =========================
+
+def read_sheet(sheet_name):
+    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+    response = requests.get(
+        url,
+        params={"tqx": "out:csv", "sheet": sheet_name},
+        timeout=20
+    )
+    response.raise_for_status()
+    text = response.content.decode("utf-8-sig")
+    return list(csv.DictReader(io.StringIO(text)))
+
 
 def get_products():
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+    return read_sheet(PRODUCTS_SHEET)
 
-    response = requests.get(
-        url,
-        params={
-            "tqx": "out:csv",
-            "sheet": SHEET_NAME
-        },
-        timeout=20
-    )
 
-    response.raise_for_status()
-
-    text = response.content.decode("utf-8-sig")
-    return list(csv.DictReader(io.StringIO(text)))
 def get_customers():
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq"
+    return read_sheet(CUSTOMERS_SHEET)
 
-    response = requests.get(
-        url,
-        params={
-            "tqx": "out:csv",
-            "sheet": "Кардарлар"
-        },
-        timeout=20
+
+def cell(row, *names):
+    for name in names:
+        value = row.get(name)
+        if value is not None and str(value).strip() != "":
+            return str(value).strip()
+    return ""
+
+
+def customer_by_code(code):
+    code = (code or "").strip().upper()
+    for row in get_customers():
+        row_code = cell(row, "Кардар коду").upper()
+        if row_code == code:
+            return row
+    return None
+
+
+def customer_by_telegram_id(user_id):
+    uid = str(user_id).strip()
+
+    # 1) Алгач таблицадагы Telegram ID каралат
+    for row in get_customers():
+        saved = cell(row, "Telegram ID", "TelegramID", "Telegram id")
+        if saved == uid:
+            return row
+
+    # 2) Андан кийин боттун бир жолку байланышы каралат
+    code = get_bound_code(user_id)
+    if code:
+        return customer_by_code(code)
+
+    return None
+
+
+def bot_allowed(customer):
+    value = cell(customer, "Ботко уруксат").lower()
+    if not value:
+        return True
+    return value in {"ооба", "да", "yes", "1", "true"}
+
+
+# =========================
+# TEXTS
+# =========================
+
+TEXTS = {
+    "kg": {
+        "profile": "👤 Профиль",
+        "parcels": "📦 Менин посылкаларым",
+        "track": "🔎 Тректи текшерүү",
+        "addresses": "📍 Биздин даректер",
+        "forbidden": "🚫 Тыюу салынган товарлар",
+        "support": "☎️ Колдоо",
+        "language": "🌐 Тилди өзгөртүү",
+        "welcome": "👋 ISHAK Cargo'го кош келиңиз!\n\n🇨🇳 Кытайдан Кыргызстанга товар жеткирүү 🇰🇬\n\nКеректүү бөлүмдү тандаңыз 👇",
+    },
+    "ru": {
+        "profile": "👤 Профиль",
+        "parcels": "📦 Мои посылки",
+        "track": "🔎 Отследить трек",
+        "addresses": "📍 Наши адреса",
+        "forbidden": "🚫 Запрещённые товары",
+        "support": "☎️ Поддержка",
+        "language": "🌐 Изменить язык",
+        "welcome": "👋 Добро пожаловать в ISHAK Cargo!\n\n🇨🇳 Доставка товаров из Китая в Кыргызстан 🇰🇬\n\nВыберите нужный раздел 👇",
+    }
+}
+
+
+STATUS_RU = {
+    "Кытайдан чыкты": "Выехал из Китая",
+    "Жолго чыкты": "Выехал из Китая",
+    "Кыргызстанга келди": "Прибыл в Кыргызстан",
+    "Кардар алды": "Клиент получил",
+}
+
+STATUS_KG = {
+    "Кытайдан чыкты": "Кытайдан чыкты",
+    "Жолго чыкты": "Кытайдан чыкты",
+    "Кыргызстанга келди": "Кыргызстанга келди",
+    "Кардар алды": "Кардар алды",
+}
+
+
+def status_for_lang(status, lang):
+    status = (status or "").strip()
+    if lang == "ru":
+        return STATUS_RU.get(status, status or "Не указан")
+    return STATUS_KG.get(status, status or "Көрсөтүлгөн эмес")
+
+
+# =========================
+# KEYBOARDS
+# =========================
+
+def language_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.row(
+        types.KeyboardButton("🇰🇬 Кыргызча"),
+        types.KeyboardButton("🇷🇺 Русский")
     )
+    return kb
 
-    response.raise_for_status()
 
-    text = response.content.decode("utf-8-sig")
-    return list(csv.DictReader(io.StringIO(text)))
-
-# =========================
-# TELEGRAM MENU
-# =========================
-
-def main_menu():
-    markup = types.ReplyKeyboardMarkup(
+def main_menu(lang):
+    t = TEXTS[lang]
+    kb = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         is_persistent=True,
         row_width=2
     )
-
-    markup.row(
-        types.KeyboardButton("👤 Профиль"),
-        types.KeyboardButton("📦 Мои посылки")
+    kb.row(
+        types.KeyboardButton(t["profile"]),
+        types.KeyboardButton(t["parcels"])
     )
-
-    markup.row(
-        types.KeyboardButton("🔎 Отследить трек"),
-        types.KeyboardButton("📍 Наши адреса")
+    kb.row(
+        types.KeyboardButton(t["track"]),
+        types.KeyboardButton(t["addresses"])
     )
-
-    markup.row(
-        types.KeyboardButton("🚫 Запрещённые товары"),
-        types.KeyboardButton("☎️ Поддержка")
+    kb.row(
+        types.KeyboardButton(t["forbidden"]),
+        types.KeyboardButton(t["support"])
     )
-
-    return markup
-
-
-def setup_commands():
-    commands = [
-        types.BotCommand("start", "Запустить бот"),
-        types.BotCommand("menu", "Главное меню"),
-        types.BotCommand("profile", "Профиль"),
-        types.BotCommand("parcels", "Мои посылки"),
-        types.BotCommand("track", "Отследить трек"),
-        types.BotCommand("addresses", "Наши адреса"),
-        types.BotCommand("forbidden", "Запрещённые товары"),
-        types.BotCommand("support", "Поддержка"),
-    ]
-
-    bot.set_my_commands(commands)
-
-    try:
-        bot.set_chat_menu_button(
-            menu_button=types.MenuButtonCommands()
-        )
-    except Exception as error:
-        print("MENU BUTTON ERROR:", error)
+    kb.row(types.KeyboardButton(t["language"]))
+    return kb
 
 
 # =========================
-# START / MENU
+# START / LANGUAGE
 # =========================
 
-@bot.message_handler(commands=["start", "menu"])
+@bot.message_handler(commands=["start"])
 def start(message):
-    text = (
-        "👋 Добро пожаловать в ISHAK Cargo!\n\n"
-        "🇨🇳 Доставка товаров из Китая в Кыргызстан 🇰🇬\n\n"
-        "Выберите нужный раздел 👇"
-    )
-
     bot.send_message(
         message.chat.id,
-        text,
-        reply_markup=main_menu()
+        "🌐 Тилди тандаңыз / Выберите язык",
+        reply_markup=language_keyboard()
+    )
+
+
+@bot.message_handler(func=lambda m: m.text in ["🇰🇬 Кыргызча", "🇷🇺 Русский"])
+def choose_language(message):
+    lang = "kg" if message.text == "🇰🇬 Кыргызча" else "ru"
+    set_lang(message.from_user.id, lang)
+    bot.send_message(
+        message.chat.id,
+        TEXTS[lang]["welcome"],
+        reply_markup=main_menu(lang)
+    )
+
+
+@bot.message_handler(commands=["menu"])
+def menu_command(message):
+    lang = get_lang(message)
+    bot.send_message(
+        message.chat.id,
+        TEXTS[lang]["welcome"],
+        reply_markup=main_menu(lang)
+    )
+
+
+@bot.message_handler(func=lambda m: m.text in ["🌐 Тилди өзгөртүү", "🌐 Изменить язык"])
+def change_language(message):
+    bot.send_message(
+        message.chat.id,
+        "🌐 Тилди тандаңыз / Выберите язык",
+        reply_markup=language_keyboard()
     )
 
 
 # =========================
-# PROFILE
+# PROFILE + ONE-TIME CODE
 # =========================
 
-def find_customer_by_telegram_id(telegram_id):
-    rows = get_customers()
+def show_profile(message, customer):
+    lang = get_lang(message)
 
-    result = []
-
-    for row in rows:
-        saved_id = str(row.get("Telegram ID", "")).strip()
-
-        if saved_id == str(telegram_id):
-            result.append(row)
-
-    return result
-
-
-def show_profile(message, found):
-    customer = found[0]
-
-    customer_name = customer.get("Аты-жөнү", "")
-    customer_code = customer.get("Кардар коду", "")
-    phone = customer.get("Телефон", "")
-    kg_address = customer.get("Кыргызстандагы дареги", "")
+    name = cell(customer, "Аты-жөнү")
+    code = cell(customer, "Кардар коду")
+    phone = cell(customer, "Телефон", "Телефон-")
+    address = cell(customer, "Кыргызстандагы дареги")
 
     china_address = (
         "墨涵 18078825935 广东省佛山市南海区 "
         "里水镇草场海南州工业区98号KFC87启那科技园E104-1墨 "
-        f"(ISHAK) {customer_code} ({phone})"
+        f"(ISHAK) {code} ({phone})"
     )
 
-    text = (
-        "👤 ПРОФИЛЬ\n\n"
-        f"👤 Аты-жөнү: {customer_name}\n"
-        f"🆔 Кардар коду: {customer_code}\n"
-        f"📱 Телефон: {phone}\n"
-        f"📍 Алуу жери: {kg_address}\n\n"
-        "🇨🇳 КЫТАЙДАГЫ СКЛАДДЫН ДАРЕГИ\n\n"
-        f"{china_address}"
-    )
-
-    bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=main_menu()
-    )
-@bot.message_handler(commands=["profile"])
-@bot.message_handler(func=lambda message: message.text == "👤 Профиль")
-def profile(message):
-    try:
-        found = find_customer_by_telegram_id(
-            message.from_user.id
+    if lang == "ru":
+        text = (
+            "👤 ПРОФИЛЬ\n\n"
+            f"👤 Имя: {name}\n"
+            f"🆔 Код клиента: {code}\n"
+            f"📱 Телефон: {phone}\n"
+            f"📍 Пункт получения: {address}\n\n"
+            "🇨🇳 АДРЕС СКЛАДА В КИТАЕ\n\n"
+            f"{china_address}"
+        )
+    else:
+        text = (
+            "👤 ПРОФИЛЬ\n\n"
+            f"👤 Аты-жөнү: {name}\n"
+            f"🆔 Кардар коду: {code}\n"
+            f"📱 Телефон: {phone}\n"
+            f"📍 Алуу жери: {address}\n\n"
+            "🇨🇳 КЫТАЙДАГЫ СКЛАДДЫН ДАРЕГИ\n\n"
+            f"{china_address}"
         )
 
-        if found:
-            show_profile(message, found)
+    bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+
+
+@bot.message_handler(func=lambda m: m.text in ["👤 Профиль"])
+def profile(message):
+    lang = get_lang(message)
+    try:
+        customer = customer_by_telegram_id(message.from_user.id)
+
+        if customer:
+            if not bot_allowed(customer):
+                text = "⛔ Ботко кирүүгө уруксат жок." if lang == "kg" else "⛔ Доступ к боту запрещён."
+                bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+                return
+            show_profile(message, customer)
             return
 
-        msg = bot.send_message(
-            message.chat.id,
+        prompt = (
+            "👤 Профилиңиз Telegram аккаунтуна байланыша элек.\n\n"
+            "Кардар кодуңузду БИР ЖОЛУ жибериңиз.\n"
+            "Мисалы: K001"
+            if lang == "kg" else
             "👤 Ваш профиль пока не привязан к Telegram-аккаунту.\n\n"
-            "Отправьте код клиента один раз.\n"
-            "Например: K001",
-            reply_markup=main_menu()
+            "Отправьте код клиента ОДИН РАЗ.\n"
+            "Например: K001"
         )
 
-        bot.register_next_step_handler(
-            msg,
-            profile_by_customer_code
-        )
+        msg = bot.send_message(message.chat.id, prompt, reply_markup=main_menu(lang))
+        bot.register_next_step_handler(msg, profile_by_customer_code)
 
-    except Exception as error:
-        print("PROFILE ERROR:", error)
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Не удалось открыть профиль.",
-            reply_markup=main_menu()
-        )
+    except Exception as e:
+        print("PROFILE ERROR:", e)
+        text = "⚠️ Профилди ачуу мүмкүн болгон жок." if lang == "kg" else "⚠️ Не удалось открыть профиль."
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 def profile_by_customer_code(message):
-    if message.text == "👤 Профиль":
-        profile(message)
+    lang = get_lang(message)
+    customer_code = (message.text or "").strip().upper()
+
+    try:
+        customer = customer_by_code(customer_code)
+
+        if not customer:
+            text = (
+                f"❌ {customer_code} коду менен кардар табылган жок."
+                if lang == "kg"
+                else f"❌ Клиент с кодом {customer_code} не найден."
+            )
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+            return
+
+        if not bot_allowed(customer):
+            text = "⛔ Ботко кирүүгө уруксат жок." if lang == "kg" else "⛔ Доступ к боту запрещён."
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+            return
+
+        sheet_tid = cell(customer, "Telegram ID", "TelegramID", "Telegram id")
+        if sheet_tid and sheet_tid != str(message.from_user.id):
+            text = (
+                "⛔ Бул кардар коду башка Telegram аккаунтуна байланыштырылган."
+                if lang == "kg"
+                else "⛔ Этот код клиента уже привязан к другому Telegram-аккаунту."
+            )
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+            return
+
+        if bound_to_other_user(customer_code, message.from_user.id):
+            text = (
+                "⛔ Бул кардар коду башка Telegram аккаунтуна байланыштырылган."
+                if lang == "kg"
+                else "⛔ Этот код клиента уже привязан к другому Telegram-аккаунту."
+            )
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+            return
+
+        # Кардар кодун бир жолу гана киргизет.
+        bind_code(message.from_user.id, customer_code)
+
+        show_profile(message, customer)
+
+        text = (
+            "✅ Профиль Telegram аккаунтуна байланыштырылды.\nЭми кардар кодун кайра киргизбейсиз."
+            if lang == "kg"
+            else "✅ Профиль привязан к Telegram-аккаунту.\nТеперь код клиента повторно вводить не нужно."
+        )
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+
+    except Exception as e:
+        print("PROFILE CODE ERROR:", e)
+        text = "⚠️ Кардар кодун текшерүү мүмкүн болгон жок." if lang == "kg" else "⚠️ Не удалось проверить код клиента."
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+
+
+# =========================
+# PARCELS
+# =========================
+
+def products_for_code(customer_code):
+    result = []
+    code = customer_code.strip().upper()
+    for row in get_products():
+        row_code = cell(row, "Кардар коду").upper()
+        if row_code == code:
+            result.append(row)
+    return result
+
+
+def show_parcels(message, customer):
+    lang = get_lang(message)
+    customer_code = cell(customer, "Кардар коду")
+    name = cell(customer, "Аты-жөнү")
+    rows = products_for_code(customer_code)
+
+    if not rows:
+        text = (
+            "📦 Азырынча сиздин товарыңыз табылган жок."
+            if lang == "kg"
+            else "📦 Пока товары по вашему коду не найдены."
+        )
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
         return
 
-    customer_code = message.text.strip().upper()
+    parts = []
+    total_weight = 0.0
 
-    try:
-        rows = get_customers()
-        found = []
-
-        for row in rows:
-            code = str(
-                row.get("Кардар коду", "")
-            ).strip().upper()
-
-            if code == customer_code:
-                found.append(row)
-
-        if not found:
-            bot.send_message(
-                message.chat.id,
-                f"❌ Клиент с кодом {customer_code} не найден.\n"
-                "Проверьте код и попробуйте ещё раз.",
-                reply_markup=main_menu()
-            )
-            return
-
-        show_profile(message, found)
-
-        bot.send_message(
-            message.chat.id,
-            "✅ Профиль успешно привязан к Telegram-аккаунту.",
-            reply_markup=main_menu()
-        )
-
-    except Exception as error:
-        print("PROFILE CODE ERROR:", error)
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Не удалось проверить код клиента.",
-            reply_markup=main_menu()
-        )        
-
-
-# =========================
-# MY PARCELS
-# =========================
-
-@bot.message_handler(
-    commands=["parcels"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "📦 Мои посылки"
-)
-def my_parcels(message):
-    try:
-        found = find_customer_by_telegram_id(
-            message.from_user.id
-        )
-
-        if found:
-            show_parcels(message, found)
-            return
-
-        msg = bot.send_message(
-            message.chat.id,
-            "📦 Кардар кодуңузду жибериңиз.\n\n"
-            "Мисалы: K001"
-        )
-
-        bot.register_next_step_handler(
-            msg,
-            parcels_by_code
-        )
-
-    except Exception as error:
-        print("PARCEL ERROR:", error)
-
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Маалымат алуу мүмкүн болгон жок.",
-            reply_markup=main_menu()
-        )
-
-
-def parcels_by_code(message):
-    customer_code = message.text.strip().upper()
-
-    try:
-        rows = get_products()
-
-        found = []
-
-        for row in rows:
-            code = str(
-                row.get("Кардар коду", "")
-            ).strip().upper()
-
-            if code == customer_code:
-                found.append(row)
-
-        if not found:
-            bot.send_message(
-                message.chat.id,
-                f"❌ {customer_code} коду боюнча товар табылган жок.",
-                reply_markup=main_menu()
-            )
-            return
-
-        show_parcels(message, found)
-
-    except Exception as error:
-        print("PARCEL CODE ERROR:", error)
-
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Таблицадан маалымат алуу мүмкүн болгон жок.",
-            reply_markup=main_menu()
-        )
-
-
-def show_parcels(message, found):
-    customer_name = found[0].get("Кардардын аты", "")
-    customer_code = found[0].get("Кардар коду", "")
-
-    answer = (
-        f"👤 Кардар: {customer_name}\n"
-        f"🆔 Код: {customer_code}\n\n"
-    )
-
-    total_weight = 0
-
-    for number, item in enumerate(found, 1):
-        track = item.get("Трек-код", "")
-        product = item.get("Товар", "")
-        quantity = item.get("Саны", "")
-        weight = item.get("Салмагы (кг)", "")
-        status = item.get("Статус", "")
-        received = item.get("Кардар алдыбы?", "")
+    for i, row in enumerate(rows, 1):
+        track = cell(row, "Трек-номер", "Трек-код")
+        product = cell(row, "Товар")
+        qty = cell(row, "Саны")
+        weight = cell(row, "Салмагы (кг)", "Салмагы(кг)")
+        status = status_for_lang(cell(row, "Статус"), lang)
 
         try:
-            total_weight += float(
-                str(weight).replace(",", ".")
-            )
-        except:
+            total_weight += float(weight.replace(",", ".")) if weight else 0
+        except Exception:
             pass
 
-        answer += (
-            f"📦 {number}. {product}\n"
-            f"🔎 Трек-код: {track}\n"
-            f"🔢 Саны: {quantity}\n"
-            f"⚖️ Салмагы: {weight} кг\n"
-            f"📍 Статус: {status}\n"
-        )
+        if lang == "ru":
+            parts.append(
+                f"📦 {i}. {product or 'Товар'}\n"
+                f"🔎 Трек-код: {track or '—'}\n"
+                f"🔢 Количество: {qty or '—'}\n"
+                f"⚖️ Вес: {weight or '—'} кг\n"
+                f"📍 Статус: {status}"
+            )
+        else:
+            parts.append(
+                f"📦 {i}. {product or 'Товар'}\n"
+                f"🔎 Трек-код: {track or '—'}\n"
+                f"🔢 Саны: {qty or '—'}\n"
+                f"⚖️ Салмагы: {weight or '—'} кг\n"
+                f"📍 Статус: {status}"
+            )
 
-        received_text = str(received).strip().lower()
-
-        if received_text == "ооба":
-            answer += "✅ Алынды\n"
-        elif received_text == "жок":
-            answer += "⏳ Берүүнү күтүп жатат\n"
-
-        answer += "\n"
-
-    answer += (
-        f"📊 Жалпы товар: {len(found)}\n"
-        f"⚖️ Жалпы салмак: {total_weight:.2f} кг"
-    )
+    if lang == "ru":
+        header = f"👤 Клиент: {name}\n🆔 Код: {customer_code}\n\n"
+        footer = f"\n\n📊 Всего товаров: {len(rows)}\n⚖️ Общий вес: {total_weight:.2f} кг"
+    else:
+        header = f"👤 Кардар: {name}\n🆔 Код: {customer_code}\n\n"
+        footer = f"\n\n📊 Жалпы товар: {len(rows)}\n⚖️ Жалпы салмак: {total_weight:.2f} кг"
 
     bot.send_message(
         message.chat.id,
-        answer,
-        reply_markup=main_menu()
+        header + "\n\n".join(parts) + footer,
+        reply_markup=main_menu(lang)
     )
+
+
+@bot.message_handler(func=lambda m: m.text in ["📦 Менин посылкаларым", "📦 Мои посылки"])
+def my_parcels(message):
+    lang = get_lang(message)
+    try:
+        customer = customer_by_telegram_id(message.from_user.id)
+
+        if not customer:
+            text = (
+                "👤 Адегенде «Профиль» бөлүмүнө кирип, кардар кодуңузду бир жолу жибериңиз."
+                if lang == "kg"
+                else "👤 Сначала откройте «Профиль» и один раз отправьте код клиента."
+            )
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
+            return
+
+        show_parcels(message, customer)
+
+    except Exception as e:
+        print("PARCELS ERROR:", e)
+        text = "⚠️ Маалымат алуу мүмкүн болгон жок." if lang == "kg" else "⚠️ Не удалось получить информацию."
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 # =========================
 # TRACK
 # =========================
 
-@bot.message_handler(
-    commands=["track"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "🔎 Отследить трек"
-)
-def track_instruction(message):
-    msg = bot.send_message(
-        message.chat.id,
-        "🔎 Товардын трек-кодун жибериңиз.\n\n"
-        "Мисалы: TR123456"
+@bot.message_handler(func=lambda m: m.text in ["🔎 Тректи текшерүү", "🔎 Отследить трек"])
+def track_request(message):
+    lang = get_lang(message)
+    prompt = (
+        "🔎 Товардын трек-кодун жибериңиз.\n\nМисалы: TR123456"
+        if lang == "kg"
+        else "🔎 Отправьте трек-код товара.\n\nНапример: TR123456"
     )
-
-    bot.register_next_step_handler(
-        msg,
-        search_track
-    )
+    msg = bot.send_message(message.chat.id, prompt)
+    bot.register_next_step_handler(msg, track_lookup)
 
 
-def search_track(message):
-    track_code = message.text.strip().upper()
+def track_lookup(message):
+    lang = get_lang(message)
+    track = (message.text or "").strip().upper()
 
     try:
-        rows = get_products()
-
-        found = []
-
-        for row in rows:
-            track = str(
-                row.get("Трек-код", "")
-            ).strip().upper()
-
-            if track == track_code:
-                found.append(row)
+        found = None
+        for row in get_products():
+            row_track = cell(row, "Трек-номер", "Трек-код").upper()
+            if row_track == track:
+                found = row
+                break
 
         if not found:
-            bot.send_message(
-                message.chat.id,
-                f"❌ {track_code} трек-коду боюнча товар табылган жок.",
-                reply_markup=main_menu()
+            text = (
+                f"❌ {track} трек-коду боюнча товар табылган жок."
+                if lang == "kg"
+                else f"❌ Товар по трек-коду {track} не найден."
             )
+            bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
             return
 
-        row = found[0]
+        status = status_for_lang(cell(found, "Статус"), lang)
+        product = cell(found, "Товар")
 
-        customer_code = row.get("Кардар коду", "")
-        product = row.get("Товар", "")
-        quantity = row.get("Саны", "")
-        weight = row.get("Салмагы (кг)", "")
-        status = row.get("Статус", "")
-        received = row.get("Кардар алдыбы?", "")
+        if lang == "ru":
+            text = f"🔎 Трек-код: {track}\n📦 Товар: {product or '—'}\n📍 Статус: {status}"
+        else:
+            text = f"🔎 Трек-код: {track}\n📦 Товар: {product or '—'}\n📍 Статус: {status}"
 
-        answer = (
-            "📦 Товар тууралуу маалымат\n\n"
-            f"🔎 Трек-код: {track_code}\n"
-            f"🆔 Кардар коду: {customer_code}\n"
-            f"📦 Товар: {product}\n"
-            f"🔢 Саны: {quantity}\n"
-            f"⚖️ Салмагы: {weight} кг\n"
-            f"📍 Статус: {status}\n"
-        )
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
-        received_text = str(received).strip().lower()
-
-        if received_text == "ооба":
-            answer += "✅ Кардар алып кетти\n"
-        elif received_text == "жок":
-            answer += "⏳ Берүүнү күтүп жатат\n"
-
-        bot.send_message(
-            message.chat.id,
-            answer,
-            reply_markup=main_menu()
-        )
-
-    except Exception as error:
-        print("TRACK ERROR:", error)
-
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Таблицадан маалымат алуу мүмкүн болгон жок.",
-            reply_markup=main_menu()
-        )
+    except Exception as e:
+        print("TRACK ERROR:", e)
+        text = "⚠️ Трек-кодду текшерүү мүмкүн болгон жок." if lang == "kg" else "⚠️ Не удалось проверить трек-код."
+        bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 # =========================
 # ADDRESSES
 # =========================
 
-@bot.message_handler(
-    commands=["addresses"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "📍 Наши адреса"
-)
+@bot.message_handler(func=lambda m: m.text in ["📍 Биздин даректер", "📍 Наши адреса"])
 def addresses(message):
-    text = (
-        "📍 НАШИ АДРЕСА\n\n"
-        "🏢 Бишкек\n"
-        "Склад ISHAK Cargo\n\n"
-        "🏢 Ала-Бука району\n"
-        "Склад ISHAK Cargo"
-    )
+    lang = get_lang(message)
 
-    bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=main_menu()
-    )
+    if lang == "ru":
+        text = (
+            "📍 НАШИ АДРЕСА\n\n"
+            "🏢 Бишкек\n"
+            "Склад ISHAK Cargo\n"
+            f"📞 {PHONE}\n\n"
+            "🏢 Ала-Бука район\n"
+            "Склад ISHAK Cargo\n"
+            f"📞 {PHONE}"
+        )
+    else:
+        text = (
+            "📍 БИЗДИН ДАРЕКТЕР\n\n"
+            "🏢 Бишкек\n"
+            "ISHAK Cargo склады\n"
+            f"📞 {PHONE}\n\n"
+            "🏢 Ала-Бука району\n"
+            "ISHAK Cargo склады\n"
+            f"📞 {PHONE}"
+        )
+
+    bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 # =========================
-# FORBIDDEN PRODUCTS
+# FORBIDDEN
 # =========================
 
-@bot.message_handler(
-    commands=["forbidden"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "🚫 Запрещённые товары"
-)
-def prohibited(message):
-    text = (
-        "🚫 ЗАПРЕЩЁННЫЕ ТОВАРЫ\n\n"
-        "❌ Компьютеры\n"
-        "❌ Мобильные телефоны\n"
-        "❌ Лекарства\n"
-        "❌ Военные товары\n"
-        "❌ Камуфляж\n\n"
-        "Перед заказом сомнительного товара "
-        "уточните возможность доставки."
-    )
+@bot.message_handler(func=lambda m: m.text in ["🚫 Тыюу салынган товарлар", "🚫 Запрещённые товары"])
+def forbidden(message):
+    lang = get_lang(message)
 
-    bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=main_menu()
-    )
+    if lang == "ru":
+        text = (
+            "🚫 ЗАПРЕЩЁННЫЕ ТОВАРЫ\n\n"
+            "❌ Компьютеры\n"
+            "❌ Мобильные телефоны\n"
+            "❌ Лекарства\n"
+            "❌ Военные товары\n"
+            "❌ Камуфляж\n\n"
+            "Перед заказом сомнительного товара уточните возможность доставки."
+        )
+    else:
+        text = (
+            "🚫 ТЫЮУ САЛЫНГАН ТОВАРЛАР\n\n"
+            "❌ Компьютерлер\n"
+            "❌ Мобилдик телефондор\n"
+            "❌ Дары-дармектер\n"
+            "❌ Аскердик товарлар\n"
+            "❌ Камуфляж\n\n"
+            "Шектүү товарга заказ берерден мурун жеткирүү мүмкүнчүлүгүн тактаңыз."
+        )
+
+    bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 # =========================
 # SUPPORT
 # =========================
 
-@bot.message_handler(
-    commands=["support"]
-)
-@bot.message_handler(
-    func=lambda message: message.text == "☎️ Поддержка"
-)
+@bot.message_handler(func=lambda m: m.text in ["☎️ Колдоо", "☎️ Поддержка"])
 def support(message):
-    bot.send_message(
-        message.chat.id,
-        "☎️ Поддержка ISHAK Cargo\n\n"
-        "По всем вопросам напишите нам.",
-        reply_markup=main_menu()
-    )
+    lang = get_lang(message)
+
+    if lang == "ru":
+        text = f"☎️ Поддержка ISHAK Cargo\n\nПо всем вопросам пишите или звоните нам.\n📞 {PHONE}"
+    else:
+        text = f"☎️ ISHAK Cargo колдоо кызматы\n\nБардык суроолор боюнча бизге кайрылыңыз.\n📞 {PHONE}"
+
+    bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
 # =========================
-# OTHER MESSAGES
+# COMMANDS
 # =========================
 
-@bot.message_handler(func=lambda message: True)
-def other_messages(message):
-    bot.send_message(
-        message.chat.id,
-        "☰ Нужный разделды менюдан тандаңыз 👇",
-        reply_markup=main_menu()
-    )
+def setup_commands():
+    try:
+        bot.set_my_commands([
+            types.BotCommand("start", "Запустить / Баштоо"),
+            types.BotCommand("menu", "Меню"),
+        ])
+    except Exception as e:
+        print("COMMAND ERROR:", e)
 
 
-# =========================
-# START BOT
-# =========================
-
-setup_commands()
-
-print("ISHAK Cargo bot работает...")
-
-bot.infinity_polling(skip_pending=True)
+if __name__ == "__main__":
+    setup_commands()
+    print("ISHAK Cargo bot started")
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
