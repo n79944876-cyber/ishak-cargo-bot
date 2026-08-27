@@ -13,11 +13,12 @@ from telebot import types
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-SHEET_ID = "1RlRU8YG-mqxsqtswXReeORcg-M0eeynzg-4Wby5OpFU"
+SHEET_ID = "1RlRU8VG-mqxsqtswXReeORcg-MOeeynzg-4wby5OpFU"
 PRODUCTS_SHEET = "Товарлар"
 CUSTOMERS_SHEET = "Кардарлар"
 
 PHONE = "+996 556 050 995"
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 DATA_FILE = "bot_data.json"
 
 if not TOKEN:
@@ -36,15 +37,16 @@ data_lock = threading.Lock()
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"languages": {}, "bindings": {}}
+        return {"languages": {}, "bindings": {}, "channel_id": ""}
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("languages", {})
         data.setdefault("bindings", {})
+        data.setdefault("channel_id", "")
         return data
     except Exception:
-        return {"languages": {}, "bindings": {}}
+        return {"languages": {}, "bindings": {}, "channel_id": ""}
 
 
 BOT_DATA = load_data()
@@ -71,6 +73,16 @@ def get_bound_code(user_id):
 
 def bind_code(user_id, customer_code):
     BOT_DATA["bindings"][str(user_id)] = customer_code
+    save_data()
+
+
+def get_channel_target():
+    # Railway'деги CHANNEL_ID болсо ошону колдонот; болбосо бот өзү каналдан үйрөнгөн IDни алат.
+    return CHANNEL_ID or str(BOT_DATA.get("channel_id", "")).strip()
+
+
+def save_channel_id(channel_id):
+    BOT_DATA["channel_id"] = str(channel_id)
     save_data()
 
 
@@ -422,6 +434,33 @@ def products_for_code(customer_code):
     return result
 
 
+def _parse_number(value):
+    """Google Sheets'тен келген санды коопсуз float кылып окуйт."""
+    s = str(value or "").strip().replace("\xa0", "").replace(" ", "")
+    if not s:
+        return None
+
+    try:
+        # 1 312,50 / 1,312.50 / 1312,50 / 1312.50 форматтарын колдойт
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+
+def format_som(value):
+    number = _parse_number(value)
+    if number is None:
+        return str(value).strip() if str(value or "").strip() else "—"
+    return f"{number:,.2f}".replace(",", " ").replace(".", ",")
+
+
 def show_parcels(message, customer):
     lang = get_lang(message)
     customer_code = cell(customer, "Кардар коду")
@@ -430,9 +469,9 @@ def show_parcels(message, customer):
 
     if not rows:
         text = (
-            "📦 Азырынча сиздин товарыңыз табылган жок."
+            "📦 Азырынча сиздин посылкаңыз табылган жок."
             if lang == "kg"
-            else "📦 Пока товары по вашему коду не найдены."
+            else "📦 Пока посылки по вашему коду не найдены."
         )
         bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
         return
@@ -442,39 +481,49 @@ def show_parcels(message, customer):
 
     for i, row in enumerate(rows, 1):
         track = cell(row, "Трек-номер", "Трек-код")
-        product = cell(row, "Товар")
         qty = cell(row, "Саны")
         weight = cell(row, "Салмагы (кг)", "Салмагы(кг)")
+        payment_som = cell(
+            row,
+            "Кардар төлөмү (сом)",
+            "Кардар төлөмү(сом)",
+            "Сумма (сом)",
+            "Суммасы (сом)",
+            "Төлөм (сом)"
+        )
         status = status_for_lang(cell(row, "Статус"), lang)
 
-        try:
-            total_weight += float(weight.replace(",", ".")) if weight else 0
-        except Exception:
-            pass
+        weight_number = _parse_number(weight)
+        if weight_number is not None:
+            total_weight += weight_number
+
+        payment_text = format_som(payment_som)
 
         if lang == "ru":
             parts.append(
-                f"📦 {i}. {product or 'Товар'}\n"
+                f"📦 {i}.\n"
                 f"🔎 Трек-код: {track or '—'}\n"
                 f"🔢 Количество: {qty or '—'}\n"
                 f"⚖️ Вес: {weight or '—'} кг\n"
+                f"💰 Сумма: {payment_text} сом\n"
                 f"📍 Статус: {status}"
             )
         else:
             parts.append(
-                f"📦 {i}. {product or 'Товар'}\n"
+                f"📦 {i}.\n"
                 f"🔎 Трек-код: {track or '—'}\n"
                 f"🔢 Саны: {qty or '—'}\n"
                 f"⚖️ Салмагы: {weight or '—'} кг\n"
+                f"💰 Суммасы: {payment_text} сом\n"
                 f"📍 Статус: {status}"
             )
 
     if lang == "ru":
         header = f"👤 Клиент: {name}\n🆔 Код: {customer_code}\n\n"
-        footer = f"\n\n📊 Всего товаров: {len(rows)}\n⚖️ Общий вес: {total_weight:.2f} кг"
+        footer = f"\n\n📊 Всего позиций: {len(rows)}\n⚖️ Общий вес: {total_weight:.2f} кг"
     else:
         header = f"👤 Кардар: {name}\n🆔 Код: {customer_code}\n\n"
-        footer = f"\n\n📊 Жалпы товар: {len(rows)}\n⚖️ Жалпы салмак: {total_weight:.2f} кг"
+        footer = f"\n\n📊 Жалпы позиция: {len(rows)}\n⚖️ Жалпы салмак: {total_weight:.2f} кг"
 
     bot.send_message(
         message.chat.id,
@@ -544,12 +593,9 @@ def track_lookup(message):
             return
 
         status = status_for_lang(cell(found, "Статус"), lang)
-        product = cell(found, "Товар")
 
-        if lang == "ru":
-            text = f"🔎 Трек-код: {track}\n📦 Товар: {product or '—'}\n📍 Статус: {status}"
-        else:
-            text = f"🔎 Трек-код: {track}\n📦 Товар: {product or '—'}\n📍 Статус: {status}"
+        # «Товар» деген сап көрсөтүлбөйт — трек жана статус гана.
+        text = f"🔎 Трек-код: {track}\n📍 Статус: {status}"
 
         bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
@@ -639,6 +685,138 @@ def support(message):
     bot.send_message(message.chat.id, text, reply_markup=main_menu(lang))
 
 
+
+# =========================
+# CHANNEL AUTO-LINK
+# =========================
+
+@bot.channel_post_handler(func=lambda m: True)
+def learn_channel_id(message):
+    try:
+        current = get_channel_target()
+        if not current:
+            save_channel_id(message.chat.id)
+            print(f"CHANNEL LINKED: {message.chat.id} / {getattr(message.chat, 'title', '')}")
+            bot.send_message(
+                message.chat.id,
+                "✅ ISHAK CARGO бот каналга байланышты. Автоматтык билдирүү даяр."
+            )
+    except Exception as e:
+        print("CHANNEL LINK ERROR:", e)
+
+
+# =========================
+# TELEGRAM CHANNEL AUTO POST
+# =========================
+# Каналга кг/сумма чыкпайт. Статус "Кыргызстанга келди" болгондо
+# кардар коду + трек-код автоматтык түрдө бир топтом билдирүү болуп жөнөтүлөт.
+# Жабык канал да болот: бот каналга админ болуп кошулгандан кийин биринчи тест посттон IDни өзү сактап алат.
+
+ARRIVED_STATUS = "Кыргызстанга келди"
+_channel_seen = set()
+_channel_ready = False
+
+
+def _channel_key(row):
+    code = cell(row, "Кардар коду").upper()
+    track = cell(row, "Трек-номер", "Трек-код").upper()
+    if not code or not track:
+        return None
+    return f"{code}|{track}"
+
+
+def _send_channel_batch(rows):
+    target = get_channel_target()
+    if not target or not rows:
+        return
+
+    grouped = {}
+    for row in rows:
+        code = cell(row, "Кардар коду").upper()
+        track = cell(row, "Трек-номер", "Трек-код")
+        if not code or not track:
+            continue
+        grouped.setdefault(code, []).append(track)
+
+    if not grouped:
+        return
+
+    blocks = ["📦 ISHAK CARGO", "📍 Кыргызстанга келди / Прибыло в Кыргызстан", ""]
+    for code, tracks in grouped.items():
+        blocks.append(f"🆔 Код клиента: {code}")
+        blocks.extend(f"🔎 {track}" for track in tracks)
+        blocks.append("")
+
+    text = "\n".join(blocks).strip()
+
+    # Telegram билдирүүсүнүн лимитине жетпеш үчүн чоң постту бөлүп жөнөтөбүз.
+    max_len = 3900
+    if len(text) <= max_len:
+        bot.send_message(target, text)
+        return
+
+    current = ""
+    for line in text.splitlines():
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > max_len:
+            if current:
+                bot.send_message(target, current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        bot.send_message(target, current)
+
+
+def channel_watcher():
+    global _channel_ready
+
+    while True:
+        try:
+            target = get_channel_target()
+            if not target:
+                print("CHANNEL: канал ID азырынча табыла элек — ботту каналга админ кылып, бир тест пост жазыңыз")
+                threading.Event().wait(15)
+                continue
+
+            rows = get_products()
+            current_arrived = set()
+            newly_arrived = []
+
+            for row in rows:
+                key = _channel_key(row)
+                if not key:
+                    continue
+
+                status = cell(row, "Статус")
+                if status == ARRIVED_STATUS:
+                    current_arrived.add(key)
+                    if _channel_ready and key not in _channel_seen:
+                        newly_arrived.append(row)
+
+            # Биринчи окууда эски товарларды каналга кайра жибербейбиз.
+            if not _channel_ready:
+                _channel_seen.update(current_arrived)
+                _channel_ready = True
+                print(f"CHANNEL WATCHER READY: {len(current_arrived)} existing arrivals skipped")
+            else:
+                if newly_arrived:
+                    _send_channel_batch(newly_arrived)
+                    for row in newly_arrived:
+                        key = _channel_key(row)
+                        if key:
+                            _channel_seen.add(key)
+                    print(f"CHANNEL POSTED: {len(newly_arrived)} new arrivals")
+
+            # Кардар алган же башка статус болуп калган товарларды seen ичинде калтырабыз,
+            # ошентип бир эле трек кайра-кайра каналга чыкпайт.
+
+        except Exception as e:
+            print("CHANNEL WATCHER ERROR:", e)
+
+        # Google таблицаны ар 60 секунд сайын текшерет.
+        threading.Event().wait(60)
+
 # =========================
 # COMMANDS
 # =========================
@@ -655,5 +833,10 @@ def setup_commands():
 
 if __name__ == "__main__":
     setup_commands()
+
+    # Каналга автоматтык билдирүү үчүн өзүнчө фондук текшерүү.
+    watcher = threading.Thread(target=channel_watcher, daemon=True)
+    watcher.start()
+
     print("ISHAK Cargo bot started")
     bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
